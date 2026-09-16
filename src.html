@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lohnausweis reader</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M1 2h3v12H1zM5 2h1v12H5zM7 2h1v12H7zM10 2h2v12h-2zM13 2h1v12h-1z'/></svg>">
+<style>
+:root {
+  --bg: #f3f4f2; --paper: #fff; --ink: #1a1d21; --muted: #5e656e; --rule: #d9dde1;
+  --accent: #2f6b5a; --ok-bg: #e6f0ec;
+  --err: #b42318; --err-bg: #fbeae8; --warn: #8a5a00; --warn-bg: #faf1de;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181b; --paper: #1d2125; --ink: #e8eaec; --muted: #9aa1a9; --rule: #33393f;
+    --accent: #7fbfa9; --ok-bg: #1f2e29;
+    --err: #f08a7e; --err-bg: #3a2120; --warn: #e0b35c; --warn-bg: #352b1a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.5 "Helvetica Neue", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 46rem; margin: 0 auto; padding: 4rem 1.25rem 6rem; }
+h1 { font-size: 2.5rem; line-height: 1.05; letter-spacing: -0.02em; margin: 0 0 .75rem; }
+.lede { color: var(--muted); max-width: 34rem; margin: 0 0 2.5rem; }
+button, a { color: inherit; font: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+/* Drop zone, framed like a PDF417 symbol: start pattern left, stop pattern right */
+.drop {
+  --bar: color-mix(in srgb, var(--ink) 80%, transparent);
+  position: relative; display: grid; place-items: center; text-align: center;
+  min-height: 13rem; padding: 2rem 4.5rem; cursor: pointer; overflow: hidden;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 4px;
+  transition: border-color .15s;
+}
+.drop::before, .drop::after {
+  content: ""; position: absolute; top: 1.25rem; bottom: 1.25rem; width: 36px;
+}
+.drop::before { /* 8 1 1 1 1 1 1 3 */
+  left: 1.25rem;
+  background: linear-gradient(90deg, var(--bar) 0 16px, transparent 16px 18px, var(--bar) 18px 20px,
+    transparent 20px 22px, var(--bar) 22px 24px, transparent 24px 26px, var(--bar) 26px 28px, transparent 28px);
+}
+.drop::after { /* 7 1 1 3 1 1 1 2 1 */
+  right: 1.25rem;
+  background: linear-gradient(90deg, var(--bar) 0 14px, transparent 14px 16px, var(--bar) 16px 18px,
+    transparent 18px 24px, var(--bar) 24px 26px, transparent 26px 28px, var(--bar) 28px 30px,
+    transparent 30px 34px, var(--bar) 34px 36px);
+}
+.drop:hover, .drop.over { border-color: var(--accent); }
+.drop.over { --bar: var(--accent); }
+.drop strong { display: block; font-size: 1.25rem; }
+.drop span { color: var(--muted); font-size: .9375rem; }
+.drop .scan {
+  position: absolute; left: 0; right: 0; height: 2px; top: 0; opacity: 0;
+  background: var(--accent);
+}
+.drop.busy { cursor: progress; }
+.drop.busy .scan { opacity: 1; animation: sweep 1.6s ease-in-out infinite alternate; }
+@keyframes sweep { from { top: 8%; } to { top: 92%; } }
+@media (prefers-reduced-motion: reduce) { .drop.busy .scan { animation: none; top: 50%; } }
+input[type=file] { display: none; }
+
+.status { min-height: 1.5rem; margin: 1rem 0 0; color: var(--muted); font-size: .9375rem; }
+
+/* Messages */
+.msgs { list-style: none; padding: 0; margin: 1rem 0 0; display: grid; gap: .5rem; }
+.msg { padding: .625rem .875rem; border-radius: 4px; font-size: .9375rem; border-left: 3px solid; }
+.msg.error { background: var(--err-bg); border-color: var(--err); }
+.msg.warn { background: var(--warn-bg); border-color: var(--warn); }
+.msg.info { background: var(--paper); border-color: var(--rule); color: var(--muted); }
+
+/* Document */
+.doc { margin-top: 3rem; padding-top: 2rem; border-top: 2px solid var(--ink); }
+.doc h2 { font-size: 1.875rem; line-height: 1.15; letter-spacing: -0.015em; margin: 0; }
+.doc .sub { margin: .25rem 0 0; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: .375rem; margin: 1rem 0 0; padding: 0; list-style: none; }
+.chip { font-size: .8125rem; padding: .125rem .5rem; border-radius: 99px; background: var(--ok-bg); color: var(--accent); }
+.chip.error { background: var(--err-bg); color: var(--err); }
+.chip.warn { background: var(--warn-bg); color: var(--warn); }
+.figures { display: flex; flex-wrap: wrap; gap: 2.5rem; margin: 1.75rem 0 0; }
+.figures div { display: flex; flex-direction: column-reverse; }
+.figures dt { color: var(--muted); font-size: .875rem; }
+.figures dd { margin: 0; font-size: 1.75rem; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+
+section { margin-top: 2.25rem; }
+section h3 { font-size: 1rem; margin: 0 0 .5rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0 1rem; }
+section h3 small { font-weight: 400; color: var(--muted); }
+.rows { background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; }
+.row {
+  display: grid; grid-template-columns: 3.25rem 1fr auto; gap: 1rem; align-items: baseline;
+  padding: .5rem .875rem; border-top: 1px solid var(--rule);
+}
+.row:first-child { border-top: 0; }
+.row .box { color: var(--muted); font-size: .8125rem; font-variant-numeric: tabular-nums; }
+.row .label { padding-left: calc(var(--depth, 0) * 1rem); }
+.row .label small { display: block; color: var(--muted); font-size: .875rem; }
+.row .val { text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; max-width: 22rem; }
+.row.group .label { font-weight: 700; }
+.row.total { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.row.total .label, .row.total .val { font-weight: 700; }
+.row.cut { color: var(--err); font-size: .875rem; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.5rem; }
+.fields .row { grid-template-columns: 8.5rem 1fr; }
+.fields .label { color: var(--muted); }
+.fields .val { text-align: left; max-width: none; white-space: pre-line; }
+
+details { margin-top: 2.25rem; }
+summary { cursor: pointer; color: var(--muted); }
+details > div { margin-top: .75rem; display: grid; gap: .75rem; }
+pre {
+  margin: 0; padding: .875rem; max-height: 24rem; overflow: auto; font-size: .8125rem;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; white-space: pre-wrap; word-break: break-all;
+}
+.dl { justify-self: start; padding: .375rem .875rem; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); text-decoration: none; }
+.dl:hover { border-color: var(--accent); }
+footer { margin-top: 4rem; color: var(--muted); font-size: .8125rem; }
+
+@media (max-width: 36rem) {
+  main { padding-top: 2.5rem; }
+  h1 { font-size: 2rem; }
+  .drop { padding: 2rem 3.5rem; }
+  .drop::before, .drop::after { transform: scaleX(.7); transform-origin: left; }
+  .drop::after { transform-origin: right; }
+  .cols { grid-template-columns: 1fr; }
+  .row { grid-template-columns: 2.5rem 1fr auto; gap: .5rem; }
+  .fields .row { grid-template-columns: 1fr; gap: 0; }
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>Lohnausweis reader</h1>
+  <p class="lede">Reads the 2D barcode printed on a Swiss salary certificate and shows what it contains. Everything runs in this tab; your file never leaves your device.</p>
+
+  <div class="drop" id="drop" role="button" tabindex="0" aria-describedby="status">
+    <div><strong>Drop your Lohnausweis here</strong><span>A PDF, or one image per page. Click to choose files.</span></div>
+    <i class="scan"></i>
+  </div>
+  <input type="file" id="file" accept="application/pdf,image/*" multiple>
+  <p class="status" id="status" aria-live="polite"></p>
+  <ul class="msgs" id="msgs"></ul>
+  <div id="out"></div>
+
+  <footer>Works offline. Field names follow the Swissdec salary standard (ELM); unknown fields are shown as they appear in the data.</footer>
+</main>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+
+/* ---------- Vendored libraries (gzip + base64, injected at build) ---------- */
+
+async function vendor(id, type) {
+  const bin = Uint8Array.from(atob($(id).textContent.trim()), c => c.charCodeAt(0));
+  const raw = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  return type ? URL.createObjectURL(new Blob([raw], { type })) : raw;
+}
+
+const libs = (async () => {
+  const [pdfUrl, workerUrl, zxUrl, wasmBinary] = await Promise.all([
+    vendor('v-pdf', 'text/javascript'), vendor('v-pdf-worker', 'text/javascript'),
+    vendor('v-zxing', 'text/javascript'), vendor('v-zxing-wasm'),
+  ]);
+  // pdf.js runs its worker code on the main thread: module workers from blob URLs fail on file:// pages.
+  globalThis.pdfjsWorker = await import(workerUrl);
+  const pdfjs = await import(pdfUrl);
+  await new Promise((ok, fail) => document.head.append(Object.assign(el('script'), { src: zxUrl, onload: ok, onerror: fail })));
+  const zx = globalThis.ZXingWASM;
+  await zx.prepareZXingModule({ overrides: { wasmBinary }, fireImmediately: true });
+  return { pdfjs, zx };
+})();
+
+/* ---------- 1. Images → PDF417 barcodes ---------- */
+
+const imageData = source => {
+  const c = Object.assign(el('canvas'), { width: source.width, height: source.height });
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(source, 0, 0);
+  return ctx.getImageData(0, 0, c.width, c.height);
+};
+
+async function renderPage(page, scale) {
+  const viewport = page.getViewport({ scale });
+  const canvas = Object.assign(el('canvas'), { width: Math.ceil(viewport.width), height: Math.ceil(viewport.height) });
+  await page.render({ canvas, viewport, background: '#fff' }).promise;
+  return imageData(canvas);
+}
+
+// Yields { src, images: [() => ImageData] } per page, trying a larger render if the first finds nothing.
+async function* pages(files, pdfjs) {
+  for (const file of files) {
+    const prefix = files.length > 1 ? `${file.name}, ` : '';
+    if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
+      const task = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+      const pdf = await task.promise.catch(e => { throw new Error(`${file.name}: ${e.message}`); });
+      for (let n = 1; n <= pdf.numPages; n++) {
+        const page = await pdf.getPage(n);
+        yield { src: `${prefix}page ${n}`, images: [3, 5].map(s => () => renderPage(page, s)) };
+      }
+      task.destroy();
+    } else {
+      yield { src: file.name, images: [async () => imageData(await createImageBitmap(file))] };
+    }
+  }
+}
+
+/* ---------- 2. Barcode payload → Swissdec segment ---------- */
+
+const HEADER = 14;
+const hex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join(' ');
+
+// [0:4] document id | [4] 0x7a | [5:8] length of this barcode | [10:12] index | [12:14] total
+function parseSegment(b) {
+  if (b.length < HEADER || b[4] !== 0x7a) return null;
+  return {
+    id: hex(b.subarray(0, 4)),
+    length: (b[5] << 16) | (b[6] << 8) | b[7],
+    index: (b[10] << 8) | b[11],
+    total: (b[12] << 8) | b[13],
+    header: hex(b.subarray(0, HEADER)),
+    size: b.length,
+    data: b.subarray(HEADER),
+  };
+}
+
+const concat = parts => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  parts.reduce((o, p) => (out.set(p, o), o + p.length), 0);
+  return out;
+};
+
+/* ---------- 3. ZIP → XML ---------- */
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  for (let k = 0; k < 8; k++) n = n & 1 ? 0xedb88320 ^ (n >>> 1) : n >>> 1;
+  return n >>> 0;
+});
+const crc32 = b => (b.reduce((c, x) => CRC_TABLE[(c ^ x) & 255] ^ (c >>> 8), 0xffffffff) ^ 0xffffffff) >>> 0;
+
+const dosDate = (d, t) => new Date((d >> 9) + 1980, ((d >> 5) & 15) - 1, d & 31, t >> 11, (t >> 5) & 63, (t & 31) * 2);
+
+// Reads the first ZIP entry. Sizes and CRC come from the central directory, which only exists when all barcodes are present.
+function readZip(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  if (buf.length < 30 || dv.getUint32(0, true) !== 0x04034b50) throw new Error('The barcode data does not contain the expected ZIP archive.');
+  const nameLen = dv.getUint16(26, true), extraLen = dv.getUint16(28, true);
+  const entry = {
+    name: new TextDecoder().decode(buf.subarray(30, 30 + nameLen)),
+    method: dv.getUint16(8, true),
+    modified: dosDate(dv.getUint16(12, true), dv.getUint16(10, true)),
+    start: 30 + nameLen + extraLen,
+    crc: dv.getUint32(14, true), csize: dv.getUint32(18, true), usize: dv.getUint32(22, true),
+    entries: 1, verifiable: false,
+  };
+  for (let p = buf.length - 22; p >= 0 && p >= buf.length - 22 - 0xffff; p--) {
+    if (dv.getUint32(p, true) !== 0x06054b50) continue;
+    const cd = dv.getUint32(p + 16, true);
+    entry.entries = dv.getUint16(p + 10, true);
+    if (cd + 46 <= buf.length && dv.getUint32(cd, true) === 0x02014b50) {
+      Object.assign(entry, { crc: dv.getUint32(cd + 16, true), csize: dv.getUint32(cd + 20, true), usize: dv.getUint32(cd + 24, true), verifiable: true });
+    }
+    break;
+  }
+  const end = entry.verifiable ? entry.start + entry.csize : buf.length;
+  entry.data = buf.subarray(entry.start, end);
+  return entry;
+}
+
+// Inflates as much as possible: output produced before an error (e.g. truncated input) is kept.
+async function inflate(bytes) {
+  const ds = new DecompressionStream('deflate-raw');
+  const writer = ds.writable.getWriter(), reader = ds.readable.getReader();
+  const chunks = [];
+  let error = null;
+  const reading = (async () => {
+    try { for (let r; !(r = await reader.read()).done;) chunks.push(r.value); }
+    catch (e) { error ??= e; }
+  })();
+  try {
+    for (let i = 0; i < bytes.length; i += 1024) {
+      await writer.write(bytes.subarray(i, i + 1024));
+      await new Promise(r => setTimeout(r)); // let the reader drain before a possible error discards its queue
+    }
+    await writer.close();
+  } catch (e) { error ??= e; }
+  await reading;
+  return { data: concat(chunks), error };
+}
+
+// Closes open tags of a truncated XML document; drops elements whose content was cut off.
+function repairXml(text) {
+  let cut = text.slice(0, text.lastIndexOf('>') + 1);
+  const tags = [...cut.matchAll(/<(\/?)([A-Za-z_][\w.:-]*)[^>]*?(\/?)>/g)];
+  const stack = [];
+  for (const [, close, name, self] of tags) {
+    if (self) continue;
+    close ? stack.pop() : stack.push(name);
+  }
+  // Trailing opening tags have no complete content: remove them rather than show them as empty.
+  for (let i = tags.length - 1; i >= 0 && !tags[i][1] && !tags[i][3]; i--) {
+    cut = cut.slice(0, tags[i].index);
+    stack.pop();
+  }
+  return cut + stack.reverse().map(n => `</${n}>`).join('');
+}
+
+async function decodeDocument(doc) {
+  const issues = [];
+  const segs = [...doc.segs.values()];
+  const total = Math.max(...segs.map(s => s.total));
+  if (new Set(segs.map(s => s.total)).size > 1) issues.push(['warn', 'The barcodes disagree on how many belong to this certificate.']);
+  for (const s of segs) {
+    if (s.length !== s.size) issues.push(['warn', `Barcode ${s.index} should hold ${s.length} bytes but ${s.size} were read.`]);
+  }
+  const missing = Array.from({ length: total }, (_, i) => i + 1).filter(i => !doc.segs.has(i));
+  if (missing.length) {
+    issues.push(['error', `Barcode ${missing.join(', ')} of ${total} is missing. The certificate has ${total} barcodes, usually one per page, so ${missing.length > 1 ? 'pages are' : 'a page is'} likely missing.`]);
+  }
+  const res = { doc, total, missing, issues, complete: !missing.length };
+
+  const parts = [];
+  for (let i = 1; doc.segs.has(i); i++) parts.push(doc.segs.get(i).data);
+  if (!parts.length) {
+    issues.push(['error', 'Without the first barcode nothing can be decoded: it holds the start of the compressed data.']);
+    return res;
+  }
+  if (parts.length < total && parts.length < doc.segs.size) {
+    issues.push(['info', `Only barcodes 1 to ${parts.length} can be used; data after a gap cannot be decompressed.`]);
+  }
+
+  try {
+    const zip = res.zip = readZip(concat(parts));
+    if (zip.entries > 1) issues.push(['info', `The archive has ${zip.entries} files; only "${zip.name}" is shown.`]);
+    let bytes, err = null;
+    if (zip.method === 0) bytes = zip.data;
+    else if (zip.method === 8) ({ data: bytes, error: err } = await inflate(zip.data));
+    else throw new Error(`Unsupported compression method ${zip.method}.`);
+
+    if (zip.verifiable) {
+      res.crcOk = crc32(bytes) === zip.crc && bytes.length === zip.usize;
+      if (!res.crcOk) issues.push(['error', 'The decoded data fails its checksum. Some values may be wrong.']);
+    } else if (res.complete) {
+      issues.push(['warn', 'The archive index was not found, so the data could not be verified.']);
+    }
+    if (err && res.complete) issues.push(['error', `Decompression stopped early: ${err.message}`]);
+    if (!bytes.length) throw new Error('No data could be decompressed.');
+
+    let text = res.xml = new TextDecoder().decode(bytes);
+    const parse = t => {
+      const x = new DOMParser().parseFromString(t, 'application/xml');
+      return x.querySelector('parsererror') ? null : x;
+    };
+    res.dom = parse(text);
+    if (!res.dom) {
+      res.dom = parse(repairXml(text));
+      res.truncated = true;
+      if (res.complete) issues.push(['warn', 'The XML is malformed; showing what could be recovered.']);
+      else issues.push(['info', 'Showing the part of the data contained in the barcodes that were found.']);
+    }
+    if (!res.dom) issues.push(['error', 'The decoded data could not be read as XML.']);
+  } catch (e) {
+    issues.push(['error', e.message]);
+  }
+  return res;
+}
+
+/* ---------- 4. XML → human-readable ---------- */
+
+const BOXES = {
+  DocID: ['', 'Certificate number'],
+  Period: ['E', 'Period'],
+  FreeTransport: ['F', 'Free transport between home and work'],
+  CanteenLunchCheck: ['G', 'Canteen meals or lunch vouchers'],
+  Income: ['1', 'Salary'],
+  FringeBenefits: ['2', 'Fringe benefits'],
+  'FringeBenefits/FoodLodging': ['2.1', 'Board and lodging'],
+  'FringeBenefits/CompanyCar': ['2.2', 'Private use of company car'],
+  'FringeBenefits/Other': ['2.3', 'Other'],
+  SporadicBenefits: ['3', 'Irregular payments'],
+  CapitalPayment: ['4', 'Capital payments'],
+  OwnershipRight: ['5', 'Employee participation'],
+  BoardOfDirectorsRemuneration: ['6', 'Board of directors fees'],
+  OtherBenefits: ['7', 'Other payments'],
+  GrossIncome: ['8', 'Gross salary'],
+  'AHV-ALV-NBUV-AVS-AC-AANP-Contribution': ['9', 'Social security (AHV/IV/EO/ALV/NBUV)'],
+  'BVG-LPP-Contribution': ['10', 'Pension fund, 2nd pillar'],
+  'BVG-LPP-Contribution/Regular': ['10.1', 'Regular contributions'],
+  'BVG-LPP-Contribution/Purchase': ['10.2', 'Buy-in contributions'],
+  NetIncome: ['11', 'Net salary'],
+  DeductionAtSource: ['12', 'Withholding tax'],
+  ChargesRule: ['', 'Expense regulations'],
+  'ChargesRule/WithRegulation': ['', 'Approved expense regulations'],
+  'ChargesRule/WithRegulation/Allowed': ['', 'Approved on'],
+  Charges: ['13', 'Expense allowances'],
+  'Charges/Effective': ['13.1', 'Actual expenses'],
+  'Charges/Effective/TravelFoodAccommodation': ['13.1.1', 'Travel, meals, overnight stays'],
+  'Charges/Effective/Other': ['13.1.2', 'Other'],
+  'Charges/LumpSum': ['13.2', 'Lump-sum expenses'],
+  'Charges/LumpSum/Representation': ['13.2.1', 'Representation'],
+  'Charges/LumpSum/Car': ['13.2.2', 'Car'],
+  'Charges/LumpSum/Other': ['13.2.3', 'Other'],
+  'Charges/Education': ['13.3', 'Further education'],
+  OtherFringeBenefits: ['14', 'Other fringe benefits'],
+  StandardRemark: ['15', 'Standard remarks'],
+  Remark: ['15', 'Remarks'],
+};
+const TOTALS = new Set(['GrossIncome', 'NetIncome']);
+const FIELDS = {
+  'HR-RC-Name': 'Name', 'UID-BFS': 'Company ID (UID)', Person: 'Contact person', Phone: 'Phone',
+  Lastname: 'Last name', Firstname: 'First name', CL: 'Address line', Street: 'Street', Postbox: 'P.O. box',
+  ZIP: 'Postcode', City: 'City', Locality: 'Locality', Country: 'Country',
+  'SV-AS-Nr': 'AHV number', DateOfBirth: 'Date of birth', 'SV-AS-Number': 'AHV number', 'ZIP-Code': 'Postcode',
+};
+const SECTIONS = { A: 'Salary certificate', S: 'Salary certificate', B: 'Pension certificate' };
+
+const human = s => s.replace(/[-_]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim().split(' ')
+  .map((w, i) => /^[A-Z0-9]+$/.test(w) && w.length > 1 ? w : i ? w.toLowerCase() : w[0].toUpperCase() + w.slice(1).toLowerCase())
+  .join(' ');
+const money = new Intl.NumberFormat('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const date = s => s.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$3.$2.$1');
+
+function value(node) {
+  const t = node.textContent.trim();
+  if (!node.children.length && !t) return '✓ Yes';
+  if (/^-?\d+\.\d{2}$/.test(t)) return money.format(+t);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return date(t);
+  if (/^[a-z]+[A-Z]\w*$/.test(t)) return human(t);
+  return t;
+}
+const childText = (node, name) => [...node.children].find(c => c.localName === name)?.textContent.trim();
+
+function row(box, label, val, { depth = 0, note, cls = '' } = {}) {
+  const r = el('div', `row ${cls}`);
+  r.style.setProperty('--depth', depth);
+  const l = el('span', 'label', label);
+  if (note) l.append(el('small', '', note));
+  if (box != null) r.append(el('span', 'box', box));
+  r.append(l, el('span', 'val', val));
+  return r;
+}
+
+function rows(node, out, path = '', depth = 0) {
+  let line = 0;
+  for (const child of node.children) {
+    const key = child.localName, p = path ? `${path}/${key}` : key;
+    const kids = [...child.children].map(k => k.localName);
+    let [box, label] = BOXES[p] ?? ['', human(key)];
+    if (key === 'Line') label = `Position ${++line}`;
+    if (key === 'Period') {
+      out.push(row(box, label, [childText(child, 'from'), childText(child, 'until')].map(d => date(d ?? '…')).join(' – '), { depth }));
+    } else if (kids.length && kids.every(k => k === 'Text' || k === 'Sum')) {
+      const sum = [...child.children].find(c => c.localName === 'Sum');
+      out.push(row(box, label, sum ? value(sum) : '', { depth, note: childText(child, 'Text') }));
+    } else if (kids.length) {
+      out.push(row(box, label, '', { depth, cls: 'group' }));
+      rows(child, out, p, depth + 1);
+    } else {
+      const v = value(child);
+      if (v.length > 24 && !/^[\d’.\s–-]+$/.test(v)) out.push(row(box, label, '', { depth, note: v }));
+      else out.push(row(box, label, v, { depth, cls: TOTALS.has(p) ? 'total' : '' }));
+    }
+  }
+  return out;
+}
+
+const ADDRESS = ['CL', 'Street', 'Postbox', 'ZIP', 'City', 'Locality', 'Country'];
+
+function partySection(title, node, nameAttrs) {
+  const a = n => node.getAttribute(n)?.trim() ?? '';
+  const used = new Set([...ADDRESS, ...nameAttrs]);
+  const list = el('div', 'rows fields');
+  const name = nameAttrs.map(a).filter(Boolean).join(' ');
+  const address = [a('CL'), a('Street'), a('Postbox') && `P.O. box ${a('Postbox')}`,
+    `${a('ZIP')} ${a('City')}`.trim(), a('Locality'), a('Country')].filter(Boolean).join('\n');
+  if (name) list.append(row(null, 'Name', name));
+  if (address) list.append(row(null, 'Address', address));
+  for (const at of node.attributes) {
+    if (!used.has(at.name) && at.value.trim()) list.append(row(null, FIELDS[at.name] ?? human(at.name), at.value));
+  }
+  for (const c of node.children) list.append(row(null, FIELDS[c.localName] ?? human(c.localName), value(c)));
+  const s = el('section');
+  s.append(el('h3', '', title), list);
+  return s;
+}
+
+function renderDocument(res) {
+  const art = el('article', 'doc');
+  const root = res.dom?.documentElement;
+  const find = name => root && [...root.children].find(c => c.localName === name);
+  const company = find('Company'), person = find('PersonID');
+
+  const name = person ? [person.getAttribute('Firstname'), person.getAttribute('Lastname')].filter(Boolean).join(' ') : '';
+  art.append(el('h2', '', name || 'Salary certificate'));
+  const employer = company?.getAttribute('HR-RC-Name');
+  if (employer) art.append(el('p', 'sub', employer));
+
+  const chips = el('ul', 'chips');
+  const chip = (text, cls = '') => chips.append(el('li', `chip ${cls}`, text));
+  chip(`${res.total - res.missing.length} of ${res.total} barcode${res.total > 1 ? 's' : ''}`, res.missing.length ? 'error' : '');
+  if (res.crcOk != null) chip(res.crcOk ? 'Checksum OK' : 'Checksum failed', res.crcOk ? '' : 'error');
+  if (res.truncated) chip('Partial data', 'warn');
+  art.append(chips);
+
+  const msgs = el('ul', 'msgs');
+  for (const [level, text] of res.issues) msgs.append(el('li', `msg ${level}`, text));
+  if (res.issues.length) art.append(msgs);
+
+  if (root) {
+    const main = [...root.children].find(c => SECTIONS[c.localName]);
+    const figures = el('dl', 'figures');
+    for (const [key, label] of [['GrossIncome', 'Gross salary, CHF'], ['NetIncome', 'Net salary, CHF']]) {
+      const n = main && [...main.children].find(c => c.localName === key);
+      if (!n) continue;
+      const f = el('div');
+      f.append(el('dt', '', label), el('dd', '', value(n)));
+      figures.append(f);
+    }
+    if (figures.children.length) art.append(figures);
+
+    const cols = el('div', 'cols');
+    if (person) cols.append(partySection('Employee', person, ['Firstname', 'Lastname']));
+    if (company) cols.append(partySection('Employer', company, ['HR-RC-Name']));
+    if (cols.children.length) art.append(cols);
+
+    for (const node of root.children) {
+      const key = node.localName;
+      if (key === 'Company' || key === 'PersonID') continue;
+      const s = el('section');
+      const h = el('h3', '', SECTIONS[key] ?? (/^O[A-Z]$/.test(key) ? `Employee participation supplement (${key})` : human(key)));
+      if (SECTIONS[key]) h.append(el('small', '', 'Box numbers as on the form, amounts in CHF'));
+      const list = el('div', 'rows');
+      list.append(...rows(node, []));
+      s.append(h, list);
+      art.append(s);
+    }
+    if (res.truncated) [...art.querySelectorAll('.rows')].pop()?.append(row('', 'The data ends here; the rest is in the missing barcodes.', '', { cls: 'cut' }));
+  }
+
+  art.append(technical(res));
+  return art;
+}
+
+function technical(res) {
+  const d = el('details');
+  d.append(el('summary', '', 'Technical details'));
+  const body = el('div');
+  const list = el('div', 'rows fields');
+  list.append(row(null, 'Document ID', res.doc.id));
+  for (const s of [...res.doc.segs.values()].sort((a, b) => a.index - b.index)) {
+    list.append(row(null, `Barcode ${s.index} of ${s.total}`, `Found on ${s.src}, ${s.size} bytes\nHeader ${s.header}`));
+  }
+  if (res.zip) {
+    list.append(row(null, 'Archive entry', `${res.zip.name}, ${res.zip.method === 8 ? 'deflate' : 'stored'}`));
+    list.append(row(null, 'Created', res.zip.modified.toLocaleString('de-CH')));
+    if (res.zip.verifiable) list.append(row(null, 'CRC-32', res.zip.crc.toString(16).padStart(8, '0')));
+  }
+  const ns = res.dom?.documentElement.namespaceURI;
+  if (ns) list.append(row(null, 'Schema', ns));
+  body.append(list);
+  if (res.xml) {
+    const url = URL.createObjectURL(new Blob([res.xml], { type: 'application/xml' }));
+    body.append(Object.assign(el('a', 'dl', res.truncated ? 'Download partial XML' : 'Download XML'), { href: url, download: `lohnausweis-${res.doc.id.replace(/ /g, '')}.xml` }));
+    body.append(el('pre', '', res.xml.replace(/>\s*</g, '>\n<')));
+  }
+  d.append(body);
+  return d;
+}
+
+/* ---------- Flow ---------- */
+
+const drop = $('drop'), input = $('file'), status = $('status'), msgs = $('msgs'), out = $('out');
+const say = t => (status.textContent = t);
+const note = (level, text) => msgs.append(el('li', `msg ${level}`, text));
+
+async function run(files) {
+  if (!files.length || drop.classList.contains('busy')) return;
+  drop.classList.add('busy');
+  msgs.replaceChildren();
+  out.replaceChildren();
+  const docs = new Map();
+  let scanned = 0;
+  try {
+    say('Loading decoder…');
+    const { pdfjs, zx } = await libs;
+    for await (const page of pages(files, pdfjs)) {
+      say(`Reading ${page.src}…`);
+      scanned++;
+      let found = [];
+      for (const image of page.images) {
+        found = (await zx.readBarcodes(await image(), { formats: ['PDF417'], tryHarder: true, maxNumberOfSymbols: 8 })).filter(r => r.isValid);
+        if (found.length) break;
+      }
+      if (!found.length) note('info', `No barcode found on ${page.src}.`);
+      for (const r of found) {
+        const seg = parseSegment(r.bytes);
+        if (!seg) { note('warn', `A barcode on ${page.src} is not in the Swissdec salary certificate format.`); continue; }
+        seg.src = page.src;
+        const doc = docs.get(seg.id) ?? docs.set(seg.id, { id: seg.id, segs: new Map() }).get(seg.id);
+        if (!doc.segs.has(seg.index)) doc.segs.set(seg.index, seg);
+      }
+    }
+    if (!docs.size) {
+      note('error', 'No salary certificate barcode was found. Use the original PDF, or scans of at least 200 dpi showing the whole barcode.');
+    }
+    for (const doc of docs.values()) out.append(renderDocument(await decodeDocument(doc)));
+    say(docs.size ? `Read ${scanned} ${scanned === 1 ? 'page' : 'pages'}, found ${docs.size} ${docs.size === 1 ? 'certificate' : 'certificates'}.` : '');
+  } catch (e) {
+    console.error(e);
+    say('');
+    note('error', /DecompressionStream|deflate-raw/.test(String(e)) ? 'This browser cannot decompress the data. Use a current Chrome, Edge, Firefox or Safari.' : `Could not read the file: ${e.message}`);
+  } finally {
+    drop.classList.remove('busy');
+    input.value = '';
+  }
+}
+
+drop.addEventListener('click', () => input.click());
+drop.addEventListener('keydown', e => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), input.click()));
+input.addEventListener('change', () => run([...input.files]));
+for (const t of ['dragenter', 'dragover']) drop.addEventListener(t, e => (e.preventDefault(), drop.classList.add('over')));
+for (const t of ['dragleave', 'drop']) drop.addEventListener(t, () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => (e.preventDefault(), run([...e.dataTransfer.files])));
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => e.preventDefault());
+</script>
+<!--VENDOR-->
+</body>
+</html>
